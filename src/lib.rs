@@ -18,6 +18,10 @@
 //! The 16-bit reference counter is stored packed with a 48-bit length field at the beginning
 //! of the shared array. Byte arrays that require more than 48 bits to store their length
 //! (256 terabytes) are not supported.
+//!
+//! `InlineArray::make_mut` can be used for getting a mutable reference to the bytes in this
+//! structure. If the shared reference counter is higher than  1, this acts like a `Cow` and
+//! will make self into a private copy that is safe for modification.
 
 use std::{
     alloc::{alloc, dealloc, Layout},
