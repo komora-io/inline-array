@@ -430,8 +430,8 @@ mod tests {
     }
 
     impl quickcheck::Arbitrary for InlineArray {
-        fn arbitrary(_: &mut quickcheck::Gen) -> Self {
-            todo!()
+        fn arbitrary(g: &mut quickcheck::Gen) -> Self {
+            InlineArray::from(&*vec![7; g.size()])
         }
     }
 
