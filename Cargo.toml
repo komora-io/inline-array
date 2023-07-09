@@ -1,0 +1,16 @@
+[package]
+name = "inline-array"
+version = "0.1.0"
+edition = "2021"
+authors = ["Tyler Neely <tylerneely@gmail.com>"]
+description = "efficient immutable inlinable byte array"
+license = "MIT/Apache-2.0"
+repository = "https://github.com/komora-io/inline-array"
+keywords = ["multi-threaded", "performance", "io"]
+categories = ["concurrency", "data-structures", "rust-patterns"]
+readme = "README.md"
+
+[dependencies]
+
+[dev-dependencies]
+quickcheck = "1.0.3"
