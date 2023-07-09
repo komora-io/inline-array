@@ -1,5 +1,24 @@
 #![allow(unsafe_code)]
 
+//! [`InlineArray`] is an inlinable array of bytes that is intended for situations where many bytes
+//! are being shared in database-like scenarios, where optimizing for space usage is extremely
+//! important.
+//!
+//! [`InlineArray`] uses 8 bytes on the stack. It will inline arrays of up to 7 bytes. If the bytes
+//! are longer than that, it will store them in an optimized reference-count-backed structure,
+//! where the atomic reference count is 16 bytes. If the maximum counter is reached, the bytes
+//! are copied into a new `InlineArray` with a fresh reference count of 1. This is made with
+//! the assumption that most reference counts will be far lower than 2^16.
+//!
+//! Both the inline and shared instances of `InlineArray` guarantee that the stored array is
+//! always aligned to 8-byte boundaries, regardless of if it is inline on the stack or
+//! shared on the heap. This is advantageous for using in combination with certain
+//! zero-copy serialization techniques.
+//!
+//! The 16-bit reference counter is stored packed with a 48-bit length field at the beginning
+//! of the shared array. Byte arrays that require more than 48 bits to store their length
+//! (256 terabytes) are not supported.
+
 use std::{
     alloc::{alloc, dealloc, Layout},
     convert::TryFrom,
@@ -8,11 +27,23 @@ use std::{
     iter::FromIterator,
     mem::size_of,
     ops::Deref,
-    sync::atomic::{AtomicUsize, Ordering},
+    sync::atomic::{AtomicU16, Ordering},
 };
 
 const SZ: usize = size_of::<usize>();
 const CUTOFF: usize = SZ - 1;
+const REMOTE_LEN_BYTES: usize = 6;
+
+const fn _static_tests() {
+    // static assert that RemoteHeader is 8 bytes in size
+    let _: [u8; 8] = [0; std::mem::size_of::<RemoteHeader>()];
+
+    // static assert that RemoteHeader is 8 byte-aligned
+    let _: [u8; 8] = [0; std::mem::align_of::<RemoteHeader>()];
+
+    // static assert that InlineArray is 8 bytes
+    let _: [u8; 8] = [0; std::mem::size_of::<InlineArray>()];
+}
 
 /// A buffer that may either be inline or remote and protected
 /// by an Arc. The inner buffer is guaranteed to be aligned to
@@ -23,7 +54,34 @@ pub struct InlineArray([u8; SZ]);
 impl Clone for InlineArray {
     fn clone(&self) -> InlineArray {
         if !self.is_inline() {
-            self.deref_header().rc.fetch_add(1, Ordering::Relaxed);
+            let rc = &self.deref_header().rc;
+
+            // We use 16 bytes for the reference count at
+            // the cost of this CAS and copying the inline
+            // array when we reach our max reference count size.
+            //
+            // When measured against the standard Arc reference
+            // count increment, this had a negligible performance
+            // hit that only became measurable at high contention,
+            // which is probably not likely for DB workloads where
+            // it is expected that most concurrent operations will
+            // distributed somewhat across larger structures.
+            loop {
+                let current = rc.load(Ordering::Relaxed);
+                if current == u16::MAX {
+                    return InlineArray::from(self.deref());
+                }
+
+                let cas_res = rc.compare_exchange_weak(
+                    current,
+                    current + 1,
+                    Ordering::Relaxed,
+                    Ordering::Relaxed,
+                );
+                if cas_res.is_ok() {
+                    break;
+                }
+            }
         }
         InlineArray(self.0)
     }
@@ -35,9 +93,11 @@ impl Drop for InlineArray {
             let rc = self.deref_header().rc.fetch_sub(1, Ordering::Release) - 1;
 
             if rc == 0 {
-                let layout =
-                    Layout::from_size_align(self.deref_header().len + size_of::<RemoteHeader>(), 8)
-                        .unwrap();
+                let layout = Layout::from_size_align(
+                    self.deref_header().len() + size_of::<RemoteHeader>(),
+                    8,
+                )
+                .unwrap();
 
                 std::sync::atomic::fence(Ordering::Acquire);
 
@@ -49,9 +109,26 @@ impl Drop for InlineArray {
     }
 }
 
+#[repr(align(8))]
 struct RemoteHeader {
-    rc: AtomicUsize,
-    len: usize,
+    rc: AtomicU16,
+    len: [u8; REMOTE_LEN_BYTES],
+}
+
+impl RemoteHeader {
+    const fn len(&self) -> usize {
+        let buf: [u8; 8] = [
+            self.len[0],
+            self.len[1],
+            self.len[2],
+            self.len[3],
+            self.len[4],
+            self.len[5],
+            0,
+            0,
+        ];
+        usize::from_le_bytes(buf)
+    }
 }
 
 impl Deref for InlineArray {
@@ -64,7 +141,7 @@ impl Deref for InlineArray {
         } else {
             unsafe {
                 let data_ptr = self.remote_ptr().add(size_of::<RemoteHeader>());
-                let len = self.deref_header().len;
+                let len = self.deref_header().len();
                 std::slice::from_raw_parts(data_ptr, len)
             }
         }
@@ -100,10 +177,18 @@ impl InlineArray {
             let layout =
                 Layout::from_size_align(slice.len() + size_of::<RemoteHeader>(), 8).unwrap();
 
-            let header = RemoteHeader {
-                rc: 1.into(),
-                len: slice.len(),
-            };
+            let slice_len_buf = slice.len().to_le_bytes();
+            let len: [u8; REMOTE_LEN_BYTES] = [
+                slice_len_buf[0],
+                slice_len_buf[1],
+                slice_len_buf[2],
+                slice_len_buf[3],
+                slice_len_buf[4],
+                slice_len_buf[5],
+            ];
+            assert_eq!(slice_len_buf[6], 0);
+            assert_eq!(slice_len_buf[7], 0);
+            let header = RemoteHeader { rc: 1.into(), len };
 
             unsafe {
                 let ptr = alloc(layout);
@@ -180,7 +265,7 @@ impl InlineArray {
             }
             unsafe {
                 let data_ptr = self.remote_ptr().add(size_of::<RemoteHeader>());
-                let len = self.deref_header().len;
+                let len = self.deref_header().len();
                 std::slice::from_raw_parts_mut(data_ptr as *mut u8, len)
             }
         }
@@ -290,7 +375,7 @@ impl fmt::Debug for InlineArray {
 }
 
 #[cfg(test)]
-mod qc {
+mod tests {
     use super::InlineArray;
 
     #[test]
