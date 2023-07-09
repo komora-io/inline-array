@@ -426,12 +426,15 @@ mod tests {
             return false;
         }
 
+        let buf: &[u8] = inline_array.as_ref();
+        assert_eq!(buf.as_ptr() as usize % 8, 0);
+
         true
     }
 
     impl quickcheck::Arbitrary for InlineArray {
         fn arbitrary(g: &mut quickcheck::Gen) -> Self {
-            InlineArray::from(&*vec![7; g.size()])
+            InlineArray::from(Vec::arbitrary(g))
         }
     }
 
