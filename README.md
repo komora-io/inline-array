@@ -25,3 +25,14 @@ Byte arrays that require more than 48 bits to store their length (256 terabytes)
 `InlineArray::make_mut` can be used for getting a mutable reference to the bytes in this
 structure. If the shared reference counter is higher than  1, this acts like a `Cow` and
 will make self into a private copy that is safe for modification.
+
+# Examples
+
+```rust
+use inline_array::InlineArray;
+
+let ia = InlineArray::from(b"yo!");
+
+// then use it more or less like you would an Arc<[u8]>
+```
+
