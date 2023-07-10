@@ -28,7 +28,6 @@
 //!
 //! * `serde` implements `serde::Serialize` and `serde::Deserialize` for `InlineArray` (disabled by
 //! default)
-//! * `pagetable_zeroable` implements `pagetable::Zeroable` for `InlineArray` (disabled by default)
 //!
 //! # Examples
 //!
@@ -54,7 +53,7 @@ use std::{
 #[cfg(feature = "serde")]
 mod serde;
 
-const SZ: usize = size_of::<usize>();
+const SZ: usize = 8;
 const INLINE_CUTOFF: usize = SZ - 1;
 const SMALL_REMOTE_CUTOFF: usize = u8::MAX as usize;
 const BIG_REMOTE_LEN_BYTES: usize = 6;
@@ -218,6 +217,10 @@ struct BigRemoteHeader {
 
 impl BigRemoteHeader {
     const fn len(&self) -> usize {
+        #[cfg(any(target_pointer_width = "u32", feature = "fake_32_bit"))]
+        let buf: [u8; 4] = [self.len[0], self.len[1], self.len[2], self.len[3]];
+
+        #[cfg(all(target_pointer_width = "64", not(feature = "fake_32_bit")))]
         let buf: [u8; 8] = [
             self.len[0],
             self.len[1],
@@ -228,7 +231,14 @@ impl BigRemoteHeader {
             0,
             0,
         ];
-        usize::from_le_bytes(buf)
+
+        #[cfg(feature = "fake_32_bit")]
+        let ret = u32::from_le_bytes(buf) as usize;
+
+        #[cfg(not(feature = "fake_32_bit"))]
+        let ret = usize::from_le_bytes(buf);
+
+        ret
     }
 }
 
@@ -308,7 +318,8 @@ impl InlineArray {
             let layout =
                 Layout::from_size_align(slice.len() + size_of::<BigRemoteHeader>(), 8).unwrap();
 
-            let slice_len_buf = slice.len().to_le_bytes();
+            let slice_len_buf: [u8; 8] = (slice.len() as u64).to_le_bytes();
+
             let len: [u8; BIG_REMOTE_LEN_BYTES] = [
                 slice_len_buf[0],
                 slice_len_buf[1],

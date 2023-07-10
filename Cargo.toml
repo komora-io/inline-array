@@ -11,13 +11,13 @@ categories = ["concurrency", "data-structures", "rust-patterns"]
 readme = "README.md"
 
 [features]
-pagetable_zeroable = ["pagetable"]
+# this is for exercising the 32-bit functionality during test on 64-bit machines
+fake_32_bit = []
 
 [profile.release]
 debug = true
 
 [dependencies]
-pagetable = { optional = true, version = "0.4" }
 serde = { version = "1.0.171", optional = true }
 
 [dev-dependencies]
