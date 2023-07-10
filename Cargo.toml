@@ -1,6 +1,6 @@
 [package]
 name = "inline-array"
-version = "0.1.4"
+version = "0.1.6"
 edition = "2021"
 authors = ["Tyler Neely <tylerneely@gmail.com>"]
 description = "efficient immutable inlinable byte array"
@@ -10,7 +10,16 @@ keywords = ["multi-threaded", "performance", "io"]
 categories = ["concurrency", "data-structures", "rust-patterns"]
 readme = "README.md"
 
+[features]
+# this is for exercising the 32-bit functionality during test on 64-bit machines
+fake_32_bit = []
+
+[profile.release]
+debug = true
+
 [dependencies]
+serde = { version = "1.0.171", optional = true }
 
 [dev-dependencies]
+bincode = "1.3.3"
 quickcheck = "1.0.3"

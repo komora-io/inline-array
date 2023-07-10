@@ -24,6 +24,11 @@
 //! reference to the bytes in this structure. If the shared reference counter is higher than  1, this acts
 //! like a [`std::borrow::Cow`] and will make self into a private copy that is safe for modification.
 //!
+//! # Features
+//!
+//! * `serde` implements `serde::Serialize` and `serde::Deserialize` for `InlineArray` (disabled by
+//! default)
+//!
 //! # Examples
 //!
 //! ```
@@ -45,7 +50,10 @@ use std::{
     sync::atomic::{AtomicU16, AtomicU8, Ordering},
 };
 
-const SZ: usize = size_of::<usize>();
+#[cfg(feature = "serde")]
+mod serde;
+
+const SZ: usize = 8;
 const INLINE_CUTOFF: usize = SZ - 1;
 const SMALL_REMOTE_CUTOFF: usize = u8::MAX as usize;
 const BIG_REMOTE_LEN_BYTES: usize = 6;
@@ -55,6 +63,9 @@ const SMALL_REMOTE_TRAILER_TAG: u8 = 0b01;
 const BIG_REMOTE_TRAILER_TAG: u8 = 0b10;
 const TRAILER_TAG_MASK: u8 = 0b0000_0011;
 const TRAILER_PTR_MASK: u8 = 0b1111_1100;
+
+#[cfg(feature = "pagetable_zeroable")]
+impl pagetable::Zeroable for InlineArray {}
 
 #[repr(u8)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -206,6 +217,10 @@ struct BigRemoteHeader {
 
 impl BigRemoteHeader {
     const fn len(&self) -> usize {
+        #[cfg(any(target_pointer_width = "u32", feature = "fake_32_bit"))]
+        let buf: [u8; 4] = [self.len[0], self.len[1], self.len[2], self.len[3]];
+
+        #[cfg(all(target_pointer_width = "64", not(feature = "fake_32_bit")))]
         let buf: [u8; 8] = [
             self.len[0],
             self.len[1],
@@ -216,7 +231,14 @@ impl BigRemoteHeader {
             0,
             0,
         ];
-        usize::from_le_bytes(buf)
+
+        #[cfg(feature = "fake_32_bit")]
+        let ret = u32::from_le_bytes(buf) as usize;
+
+        #[cfg(not(feature = "fake_32_bit"))]
+        let ret = usize::from_le_bytes(buf);
+
+        ret
     }
 }
 
@@ -296,7 +318,8 @@ impl InlineArray {
             let layout =
                 Layout::from_size_align(slice.len() + size_of::<BigRemoteHeader>(), 8).unwrap();
 
-            let slice_len_buf = slice.len().to_le_bytes();
+            let slice_len_buf: [u8; 8] = (slice.len() as u64).to_le_bytes();
+
             let len: [u8; BIG_REMOTE_LEN_BYTES] = [
                 slice_len_buf[0],
                 slice_len_buf[1],
@@ -584,6 +607,13 @@ mod tests {
         true
     }
 
+    #[cfg(feature = "serde")]
+    fn prop_serde_roundtrip(inline_array: &InlineArray) -> bool {
+        let ser = bincode::serialize(inline_array).unwrap();
+        let de: InlineArray = bincode::deserialize(&ser).unwrap();
+        de == inline_array
+    }
+
     impl quickcheck::Arbitrary for InlineArray {
         fn arbitrary(g: &mut quickcheck::Gen) -> Self {
             InlineArray::from(Vec::arbitrary(g))
@@ -594,7 +624,12 @@ mod tests {
         #[cfg_attr(miri, ignore)]
         fn inline_array(item: InlineArray) -> bool {
             dbg!(item.len());
-            prop_identity(&item)
+            assert!(prop_identity(&item));
+
+            #[cfg(feature = "serde")]
+            assert!(prop_serde_roundtrip(&item));
+
+            true
         }
     }
 
