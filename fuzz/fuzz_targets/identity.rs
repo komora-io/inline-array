@@ -24,6 +24,10 @@ fn prop_identity(inline_array: &InlineArray) -> bool {
     let buf: &[u8] = inline_array.as_ref();
     assert_eq!(buf.as_ptr() as usize % 8, 0);
 
+    let ptr = iv2.into_raw();
+    let rt = unsafe { InlineArray::from_raw(ptr) };
+    assert_eq!(&rt, inline_array);
+
     true
 }
 
