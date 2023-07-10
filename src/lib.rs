@@ -439,6 +439,71 @@ impl InlineArray {
             }
         }
     }
+
+    /// Similar in spirit to [`std::boxed::Box::into_raw`] except always keeps the 8-byte representation,
+    /// so we return a `u64` here instead of a pointer. Must be paired with exactly one
+    /// corresponding [`InlineArray::from_raw`] to avoid a leak.
+    ///
+    /// Be certain to pay attention to the unsafe contract for `from_raw`.
+    ///
+    /// # Examples
+    /// ```
+    /// use inline_array::InlineArray;
+    ///
+    /// let bytes = b"yo!";
+    ///
+    /// let ia = InlineArray::from(bytes);
+    ///
+    /// let ptr: u64 = ia.into_raw();
+    ///
+    /// let ia_2 = unsafe { InlineArray::from_raw(ptr) };
+    ///
+    /// assert_eq!(&ia_2, bytes);
+    /// ```
+    pub fn into_raw(self) -> u64 {
+        u64::from_le_bytes(self.0)
+    }
+
+    /// Similar in spirit to [`std::boxed::Box::from_raw`].
+    ///
+    /// # Unsafe contract
+    ///
+    /// * Must only be used with a `u64` that was produced from [`InlineArray::into_raw`]
+    /// * When an [`InlineArray`] drops, it decrements a reference count (if its size is over the inline threshold)
+    ///   and when that reference count reaches 0, the backing memory that this points to is
+    ///   deallocated.
+    /// * As the reference count is small, when the max reference count is reached, a new
+    ///   allocation is created with a new reference count. This means that you can't expect
+    ///   to have as many [`InlineArray`] objects created from the same arbitrary `u64` as calls to
+    ///   clone on the initial object would intuitively (but mistakenly) allow.
+    /// * To be safe in light of the above two points, treat calls to [`InlineArray::from_raw`] as
+    ///   consuming, owned semantics for corresponding previous calls to a `into_raw`. If you try
+    ///   to be tricky with multiple calls to `from_raw` for a particular `u64`, you must be
+    ///   certain that drops are not causing your backing allocation to be deallocated and leading
+    ///   to a use after free, which may be harder to reason about than you expect at first glance.
+    ///   Headaches around use after frees are likely to follow if you don't treat a `u64` created by a
+    ///   particular call to `into_raw` as a unique pointer that should be paired with at most one
+    ///   call to `from_raw`, similar to [`std::sync::Arc::from_raw`] but actually harder to reason
+    ///   about due to the smaller reference counts causing new allocations when they reach their
+    ///   max count.
+    ///
+    /// # Examples
+    /// ```
+    /// use inline_array::InlineArray;
+    ///
+    /// let bytes = b"yo!";
+    ///
+    /// let ia = InlineArray::from(bytes);
+    ///
+    /// let ptr: u64 = ia.into_raw();
+    ///
+    /// let ia_2 = unsafe { InlineArray::from_raw(ptr) };
+    ///
+    /// assert_eq!(&ia_2, bytes);
+    /// ```
+    pub unsafe fn from_raw(raw: u64) -> InlineArray {
+        InlineArray(raw.to_le_bytes())
+    }
 }
 
 impl FromIterator<u8> for InlineArray {
