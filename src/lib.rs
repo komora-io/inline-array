@@ -46,6 +46,7 @@ use std::{
     hash::{Hash, Hasher},
     iter::FromIterator,
     mem::size_of,
+    num::NonZeroU64,
     ops::Deref,
     sync::atomic::{AtomicU16, AtomicU8, Ordering},
 };
@@ -58,9 +59,9 @@ const INLINE_CUTOFF: usize = SZ - 1;
 const SMALL_REMOTE_CUTOFF: usize = u8::MAX as usize;
 const BIG_REMOTE_LEN_BYTES: usize = 6;
 
-const INLINE_TRAILER_TAG: u8 = 0b00;
-const SMALL_REMOTE_TRAILER_TAG: u8 = 0b01;
-const BIG_REMOTE_TRAILER_TAG: u8 = 0b10;
+const INLINE_TRAILER_TAG: u8 = 0b01;
+const SMALL_REMOTE_TRAILER_TAG: u8 = 0b10;
+const BIG_REMOTE_TRAILER_TAG: u8 = 0b11;
 const TRAILER_TAG_MASK: u8 = 0b0000_0011;
 const TRAILER_PTR_MASK: u8 = 0b1111_1100;
 
@@ -438,6 +439,79 @@ impl InlineArray {
                 }
             }
         }
+    }
+
+    /// Similar in spirit to [`std::boxed::Box::into_raw`] except always keeps the 8-byte representation,
+    /// so we return a `NonZeroU64` here instead of a pointer. Must be paired with exactly one
+    /// corresponding [`InlineArray::from_raw`] to avoid a leak.
+    ///
+    /// Be certain to pay attention to the unsafe contract for `from_raw`.
+    ///
+    /// # Examples
+    /// ```
+    /// use std::num::NonZeroU64;
+    ///
+    /// use inline_array::InlineArray;
+    ///
+    /// let bytes = b"yo!";
+    ///
+    /// let ia = InlineArray::from(bytes);
+    ///
+    /// let ptr: NonZeroU64 = ia.into_raw();
+    ///
+    /// let ia_2 = unsafe { InlineArray::from_raw(ptr) };
+    ///
+    /// assert_eq!(&ia_2, bytes);
+    /// ```
+    pub fn into_raw(self) -> NonZeroU64 {
+        let ret = NonZeroU64::new(u64::from_le_bytes(self.0)).unwrap();
+
+        std::mem::forget(self);
+
+        ret
+    }
+
+    /// Similar in spirit to [`std::boxed::Box::from_raw`].
+    ///
+    /// # Unsafe contract
+    ///
+    /// * Must only be used with a `NonZeroU64` that was produced from [`InlineArray::into_raw`]
+    /// * When an [`InlineArray`] drops, it decrements a reference count (if its size is over the inline threshold)
+    ///   and when that reference count reaches 0, the backing memory that this points to is
+    ///   deallocated.
+    /// * As the reference count is small, when the max reference count is reached, a new
+    ///   allocation is created with a new reference count. This means that you can't expect
+    ///   to have as many [`InlineArray`] objects created from the same arbitrary `NonZeroU64` as calls to
+    ///   clone on the initial object would intuitively (but mistakenly) allow.
+    /// * To be safe in light of the above two points, treat calls to [`InlineArray::from_raw`] as
+    ///   consuming, owned semantics for corresponding previous calls to a `into_raw`. If you try
+    ///   to be tricky with multiple calls to `from_raw` for a particular `NonZeroU64`, you must be
+    ///   certain that drops are not causing your backing allocation to be deallocated and leading
+    ///   to a use after free, which may be harder to reason about than you expect at first glance.
+    ///   Headaches around use after frees are likely to follow if you don't treat a `NonZeroU64` created by a
+    ///   particular call to `into_raw` as a unique pointer that should be paired with at most one
+    ///   call to `from_raw`, similar to [`std::sync::Arc::from_raw`] but actually harder to reason
+    ///   about due to the smaller reference counts causing new allocations when they reach their
+    ///   max count.
+    ///
+    /// # Examples
+    /// ```
+    /// use std::num::NonZeroU64;
+    ///
+    /// use inline_array::InlineArray;
+    ///
+    /// let bytes = b"yo!";
+    ///
+    /// let ia = InlineArray::from(bytes);
+    ///
+    /// let ptr: NonZeroU64 = ia.into_raw();
+    ///
+    /// let ia_2 = unsafe { InlineArray::from_raw(ptr) };
+    ///
+    /// assert_eq!(&ia_2, bytes);
+    /// ```
+    pub unsafe fn from_raw(raw: NonZeroU64) -> InlineArray {
+        InlineArray(raw.get().to_le_bytes())
     }
 }
 
