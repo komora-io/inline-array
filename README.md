@@ -26,6 +26,11 @@ Byte arrays that require more than 48 bits to store their length (256 terabytes)
 structure. If the shared reference counter is higher than  1, this acts like a `Cow` and
 will make self into a private copy that is safe for modification.
 
+# Features
+
+* `serde` implements `serde::Serialize` and `serde::Deserialize` for `InlineArray` (disabled by
+default)
+
 # Examples
 
 ```rust
