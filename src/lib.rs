@@ -51,6 +51,11 @@ use std::{
     sync::atomic::{AtomicU16, AtomicU8, Ordering},
 };
 
+#[cfg(feature = "concurrent_map_minimum")]
+impl concurrent_map::Minimum for InlineArray {
+    const MIN: InlineArray = EMPTY;
+}
+
 #[cfg(feature = "serde")]
 mod serde;
 
@@ -65,8 +70,8 @@ const BIG_REMOTE_TRAILER_TAG: u8 = 0b11;
 const TRAILER_TAG_MASK: u8 = 0b0000_0011;
 const TRAILER_PTR_MASK: u8 = 0b1111_1100;
 
-#[cfg(feature = "pagetable_zeroable")]
-impl pagetable::Zeroable for InlineArray {}
+/// A const-friendly empty `InlineArray`
+pub const EMPTY: InlineArray = InlineArray([0, 0, 0, 0, 0, 0, 0, INLINE_TRAILER_TAG]);
 
 #[repr(u8)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

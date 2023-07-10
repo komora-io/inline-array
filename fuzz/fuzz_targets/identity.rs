@@ -28,6 +28,10 @@ fn prop_identity(inline_array: &InlineArray) -> bool {
     let rt = unsafe { InlineArray::from_raw(ptr) };
     assert_eq!(&rt, inline_array);
 
+    if inline_array.is_empty() {
+        assert_eq!(inline_array, &inline_array::EMPTY);
+    }
+
     true
 }
 
