@@ -24,6 +24,12 @@
 //! reference to the bytes in this structure. If the shared reference counter is higher than  1, this acts
 //! like a [`std::borrow::Cow`] and will make self into a private copy that is safe for modification.
 //!
+//! # Features
+//!
+//! * `serde` implements `serde::Serialize` and `serde::Deserialize` for `InlineArray` (disabled by
+//! default)
+//! * `pagetable_zeroable` implements `pagetable::Zeroable` for `InlineArray` (disabled by default)
+//!
 //! # Examples
 //!
 //! ```
@@ -45,6 +51,9 @@ use std::{
     sync::atomic::{AtomicU16, AtomicU8, Ordering},
 };
 
+#[cfg(feature = "serde")]
+mod serde;
+
 const SZ: usize = size_of::<usize>();
 const INLINE_CUTOFF: usize = SZ - 1;
 const SMALL_REMOTE_CUTOFF: usize = u8::MAX as usize;
@@ -55,6 +64,9 @@ const SMALL_REMOTE_TRAILER_TAG: u8 = 0b01;
 const BIG_REMOTE_TRAILER_TAG: u8 = 0b10;
 const TRAILER_TAG_MASK: u8 = 0b0000_0011;
 const TRAILER_PTR_MASK: u8 = 0b1111_1100;
+
+#[cfg(feature = "pagetable_zeroable")]
+impl pagetable::Zeroable for InlineArray {}
 
 #[repr(u8)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -584,6 +596,13 @@ mod tests {
         true
     }
 
+    #[cfg(feature = "serde")]
+    fn prop_serde_roundtrip(inline_array: &InlineArray) -> bool {
+        let ser = bincode::serialize(inline_array).unwrap();
+        let de: InlineArray = bincode::deserialize(&ser).unwrap();
+        de == inline_array
+    }
+
     impl quickcheck::Arbitrary for InlineArray {
         fn arbitrary(g: &mut quickcheck::Gen) -> Self {
             InlineArray::from(Vec::arbitrary(g))
@@ -594,7 +613,12 @@ mod tests {
         #[cfg_attr(miri, ignore)]
         fn inline_array(item: InlineArray) -> bool {
             dbg!(item.len());
-            prop_identity(&item)
+            assert!(prop_identity(&item));
+
+            #[cfg(feature = "serde")]
+            assert!(prop_serde_roundtrip(&item));
+
+            true
         }
     }
 
