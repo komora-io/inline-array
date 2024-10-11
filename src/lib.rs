@@ -223,7 +223,7 @@ struct BigRemoteHeader {
 
 impl BigRemoteHeader {
     const fn len(&self) -> usize {
-        #[cfg(any(target_pointer_width = "u32", feature = "fake_32_bit"))]
+        #[cfg(any(target_pointer_width = "32", feature = "fake_32_bit"))]
         let buf: [u8; 4] = [self.len[0], self.len[1], self.len[2], self.len[3]];
 
         #[cfg(all(target_pointer_width = "64", not(feature = "fake_32_bit")))]

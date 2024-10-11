@@ -1,6 +1,6 @@
 [package]
 name = "inline-array"
-version = "0.1.12"
+version = "0.1.13"
 edition = "2021"
 authors = ["Tyler Neely <tylerneely@gmail.com>"]
 description = "efficient immutable inlinable byte array"
