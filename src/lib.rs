@@ -379,17 +379,22 @@ impl InlineArray {
 
     #[cfg(miri)]
     fn inline_len(&self) -> usize {
-        (self.trailer() >> 2) as usize
+        (self.inline_trailer() >> 2) as usize
     }
 
     #[cfg(miri)]
     fn kind(&self) -> Kind {
-        self.trailer() & TRAILER_TAG_MASK == INLINE_TRAILER_TAG
+        match self.inline_trailer() & TRAILER_TAG_MASK {
+            INLINE_TRAILER_TAG => Kind::Inline,
+            SMALL_REMOTE_TRAILER_TAG => Kind::SmallRemote,
+            BIG_REMOTE_TRAILER_TAG => Kind::BigRemote,
+            _other => unsafe { std::hint::unreachable_unchecked() },
+        }
     }
 
     #[cfg(miri)]
     fn inline_trailer(&self) -> u8 {
-        self.deref()[SZ - 1]
+        self.0[SZ - 1]
     }
 
     #[cfg(not(miri))]
