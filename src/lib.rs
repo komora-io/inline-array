@@ -625,6 +625,12 @@ impl<const N: usize> From<&[u8; N]> for InlineArray {
     }
 }
 
+impl<const N: usize> From<[u8; N]> for InlineArray {
+    fn from(v: [u8; N]) -> Self {
+        Self::from(&v[..])
+    }
+}
+
 impl Ord for InlineArray {
     fn cmp(&self, other: &Self) -> std::cmp::Ordering {
         self.as_ref().cmp(other.as_ref())
