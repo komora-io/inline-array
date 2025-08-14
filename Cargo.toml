@@ -1,7 +1,7 @@
 [package]
 name = "inline-array"
-version = "0.1.13"
-edition = "2021"
+version = "0.1.14"
+edition = "2024"
 authors = ["Tyler Neely <tylerneely@gmail.com>"]
 description = "efficient immutable inlinable byte array"
 license = "MIT OR Apache-2.0"
