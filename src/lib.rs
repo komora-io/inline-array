@@ -26,8 +26,7 @@
 //!
 //! # Features
 //!
-//! * `serde` implements `serde::Serialize` and `serde::Deserialize` for `InlineArray` (disabled by
-//! default)
+//! * `serde` implements `serde::Serialize` and `serde::Deserialize` for `InlineArray` (disabled by default)
 //!
 //! # Examples
 //!
@@ -48,6 +47,7 @@ use std::{
     mem::size_of,
     num::NonZeroU64,
     ops::Deref,
+    ptr::{with_exposed_provenance, with_exposed_provenance_mut},
     sync::atomic::{AtomicU16, AtomicU8, Ordering},
 };
 
@@ -176,13 +176,15 @@ impl Drop for InlineArray {
 
                 let layout = Layout::from_size_align(
                     small_trailer.len() + size_of::<SmallRemoteTrailer>(),
-                    8,
+                    SZ,
                 )
                 .unwrap();
 
                 unsafe {
-                    let ptr = self.remote_ptr().sub(small_trailer.len());
-                    dealloc(ptr as *mut u8, layout);
+                    let ptr = self.remote_ptr().map_addr(|a| a - small_trailer.len());
+                    let ptr_addr = ptr.expose_provenance();
+
+                    dealloc(with_exposed_provenance_mut(ptr_addr), layout);
                 }
             }
         } else if kind == Kind::BigRemote {
@@ -193,11 +195,14 @@ impl Drop for InlineArray {
                 std::sync::atomic::fence(Ordering::Acquire);
 
                 let layout =
-                    Layout::from_size_align(big_header.len() + size_of::<BigRemoteHeader>(), 8)
+                    Layout::from_size_align(big_header.len() + size_of::<BigRemoteHeader>(), SZ)
                         .unwrap();
+                let remote = self.remote_ptr();
+                let remote_addr = remote.expose_provenance();
+                let ptr = with_exposed_provenance_mut::<u8>(remote_addr);
 
                 unsafe {
-                    dealloc(self.remote_ptr() as *mut u8, layout);
+                    dealloc(ptr, layout);
                 }
             }
         }
@@ -257,13 +262,18 @@ impl Deref for InlineArray {
             Kind::Inline => &self.0[..self.inline_len()],
             Kind::SmallRemote => unsafe {
                 let len = self.deref_small_trailer().len();
-                let data_ptr = self.remote_ptr().sub(len);
-                std::slice::from_raw_parts(data_ptr, len)
+                let data_ptr = self.remote_ptr().map_addr(|a| a - len);
+                let data_addr = data_ptr.expose_provenance();
+
+                std::slice::from_raw_parts(with_exposed_provenance(data_addr), len)
             },
             Kind::BigRemote => unsafe {
-                let data_ptr = self.remote_ptr().add(size_of::<BigRemoteHeader>());
                 let len = self.deref_big_header().len();
-                std::slice::from_raw_parts(data_ptr, len)
+                let remote_ptr = self.remote_ptr();
+                let data_ptr = remote_ptr.map_addr(|a| a + size_of::<BigRemoteHeader>());
+                let data_addr = data_ptr.expose_provenance();
+
+                std::slice::from_raw_parts(with_exposed_provenance(data_addr), len)
             },
         }
     }
@@ -297,7 +307,7 @@ impl InlineArray {
             data[SZ - 1] |= INLINE_TRAILER_TAG;
         } else if slice.len() <= SMALL_REMOTE_CUTOFF {
             let layout =
-                Layout::from_size_align(slice.len() + size_of::<SmallRemoteTrailer>(), 8).unwrap();
+                Layout::from_size_align(slice.len() + size_of::<SmallRemoteTrailer>(), SZ).unwrap();
 
             let trailer = SmallRemoteTrailer {
                 rc: 1.into(),
@@ -307,11 +317,14 @@ impl InlineArray {
             unsafe {
                 let data_ptr = alloc(layout);
                 assert!(!data_ptr.is_null());
-                let trailer_ptr = data_ptr.add(slice.len());
+                let trailer_ptr = data_ptr.map_addr(|o| o + slice.len());
 
                 std::ptr::write(trailer_ptr as *mut SmallRemoteTrailer, trailer);
                 std::ptr::copy_nonoverlapping(slice.as_ptr(), data_ptr, slice.len());
-                std::ptr::write_unaligned(data.as_mut_ptr() as _, trailer_ptr);
+                std::ptr::write_unaligned(
+                    data.as_mut_ptr() as _,
+                    trailer_ptr.expose_provenance().to_le_bytes(),
+                );
             }
 
             // assert that the bottom 3 bits are empty, as we expect
@@ -322,7 +335,7 @@ impl InlineArray {
             data[SZ - 1] |= SMALL_REMOTE_TRAILER_TAG;
         } else {
             let layout =
-                Layout::from_size_align(slice.len() + size_of::<BigRemoteHeader>(), 8).unwrap();
+                Layout::from_size_align(slice.len() + size_of::<BigRemoteHeader>(), SZ).unwrap();
 
             let slice_len_buf: [u8; 8] = (slice.len() as u64).to_le_bytes();
 
@@ -342,11 +355,15 @@ impl InlineArray {
             unsafe {
                 let header_ptr = alloc(layout);
                 assert!(!header_ptr.is_null());
-                let data_ptr = header_ptr.add(size_of::<BigRemoteHeader>());
+
+                let data_ptr = header_ptr.map_addr(|o| o + size_of::<BigRemoteHeader>());
 
                 std::ptr::write(header_ptr as *mut BigRemoteHeader, header);
                 std::ptr::copy_nonoverlapping(slice.as_ptr(), data_ptr, slice.len());
-                std::ptr::write_unaligned(data.as_mut_ptr() as _, header_ptr);
+                std::ptr::write_unaligned(
+                    data.as_mut_ptr() as _,
+                    header_ptr.expose_provenance().to_le_bytes(),
+                );
             }
 
             // assert that the bottom 3 bits are empty, as we expect
@@ -361,35 +378,47 @@ impl InlineArray {
 
     fn remote_ptr(&self) -> *const u8 {
         assert_ne!(self.kind(), Kind::Inline);
+
         let mut copied = self.0;
         copied[SZ - 1] &= TRAILER_PTR_MASK;
 
-        unsafe { std::ptr::read((&copied).as_ptr() as *const *const u8) }
+        unsafe { std::ptr::read_unaligned(copied.as_ptr() as *const *const u8) }
     }
 
     fn deref_small_trailer(&self) -> &SmallRemoteTrailer {
         assert_eq!(self.kind(), Kind::SmallRemote);
-        unsafe { &*(self.remote_ptr() as *mut SmallRemoteTrailer) }
+        let remote = self.remote_ptr();
+        let ptr = with_exposed_provenance_mut(remote.expose_provenance());
+
+        unsafe { &*(ptr) }
     }
 
     fn deref_big_header(&self) -> &BigRemoteHeader {
         assert_eq!(self.kind(), Kind::BigRemote);
-        unsafe { &*(self.remote_ptr() as *mut BigRemoteHeader) }
+        let remote = self.remote_ptr();
+        let ptr = with_exposed_provenance_mut(remote.expose_provenance());
+
+        unsafe { &*(ptr) }
     }
 
     #[cfg(miri)]
     fn inline_len(&self) -> usize {
-        (self.trailer() >> 2) as usize
+        (self.inline_trailer() >> 2) as usize
     }
 
     #[cfg(miri)]
     fn kind(&self) -> Kind {
-        self.trailer() & TRAILER_TAG_MASK == INLINE_TRAILER_TAG
+        match self.inline_trailer() & TRAILER_TAG_MASK {
+            INLINE_TRAILER_TAG => Kind::Inline,
+            SMALL_REMOTE_TRAILER_TAG => Kind::SmallRemote,
+            BIG_REMOTE_TRAILER_TAG => Kind::BigRemote,
+            _other => unsafe { std::hint::unreachable_unchecked() },
+        }
     }
 
     #[cfg(miri)]
     fn inline_trailer(&self) -> u8 {
-        self.deref()[SZ - 1]
+        self.0[SZ - 1]
     }
 
     #[cfg(not(miri))]
@@ -429,8 +458,9 @@ impl InlineArray {
                 }
                 unsafe {
                     let len = self.deref_small_trailer().len();
-                    let data_ptr = self.remote_ptr().sub(len);
-                    std::slice::from_raw_parts_mut(data_ptr as *mut u8, len)
+                    let data_ptr = self.remote_ptr().map_addr(|a| a - len);
+                    let data_addr = data_ptr.expose_provenance();
+                    std::slice::from_raw_parts_mut(with_exposed_provenance_mut(data_addr), len)
                 }
             }
             Kind::BigRemote => {
@@ -438,9 +468,14 @@ impl InlineArray {
                     *self = InlineArray::from(self.deref())
                 }
                 unsafe {
-                    let data_ptr = self.remote_ptr().add(size_of::<BigRemoteHeader>());
+                    let data_ptr = self
+                        .remote_ptr()
+                        .map_addr(|a| a + size_of::<BigRemoteHeader>());
                     let len = self.deref_big_header().len();
-                    std::slice::from_raw_parts_mut(data_ptr as *mut u8, len)
+                    std::slice::from_raw_parts_mut(
+                        with_exposed_provenance_mut(data_ptr.expose_provenance()),
+                        len,
+                    )
                 }
             }
         }
@@ -478,7 +513,7 @@ impl InlineArray {
 
     /// Similar in spirit to [`std::boxed::Box::from_raw`].
     ///
-    /// # Unsafe contract
+    /// # Safety
     ///
     /// * Must only be used with a `NonZeroU64` that was produced from [`InlineArray::into_raw`]
     /// * When an [`InlineArray`] drops, it decrements a reference count (if its size is over the inline threshold)
@@ -624,6 +659,7 @@ impl fmt::Debug for InlineArray {
 
 #[cfg(test)]
 mod tests {
+
     use super::InlineArray;
 
     #[test]
@@ -671,11 +707,11 @@ mod tests {
         }
 
         if *inline_array != *iv2 {
-            println!("expected AsMut to equal original");
+            println!("expected to equal original");
             return false;
         }
 
-        if &*inline_array != iv2.make_mut() {
+        if inline_array != iv2.make_mut() {
             println!("expected AsMut to equal original");
             return false;
         }
