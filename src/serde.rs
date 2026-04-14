@@ -1,4 +1,4 @@
-use serde::{de::Deserializer, ser::Serializer, Deserialize, Serialize};
+use serde::{Deserialize, Serialize, de::Deserializer, ser::Serializer};
 
 use crate::InlineArray;
 

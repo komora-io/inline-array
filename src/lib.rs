@@ -39,7 +39,7 @@
 //! ```
 
 use std::{
-    alloc::{alloc, dealloc, Layout},
+    alloc::{Layout, alloc, dealloc},
     convert::TryFrom,
     fmt,
     hash::{Hash, Hasher},
@@ -47,8 +47,7 @@ use std::{
     mem::size_of,
     num::NonZeroU64,
     ops::Deref,
-    ptr::{with_exposed_provenance, with_exposed_provenance_mut},
-    sync::atomic::{AtomicU16, AtomicU8, Ordering},
+    sync::atomic::{AtomicU8, AtomicU16, Ordering},
 };
 
 #[cfg(feature = "concurrent_map_minimum")]
@@ -68,10 +67,13 @@ const INLINE_TRAILER_TAG: u8 = 0b01;
 const SMALL_REMOTE_TRAILER_TAG: u8 = 0b10;
 const BIG_REMOTE_TRAILER_TAG: u8 = 0b11;
 const TRAILER_TAG_MASK: u8 = 0b0000_0011;
-const TRAILER_PTR_MASK: u8 = 0b1111_1100;
+const REMOTE_TAG_SHIFT: usize = (SZ - 1) * 8;
+const REMOTE_TAG_MASK: usize = (TRAILER_TAG_MASK as usize) << REMOTE_TAG_SHIFT;
 
 /// A const-friendly empty `InlineArray`
-pub const EMPTY: InlineArray = InlineArray([0, 0, 0, 0, 0, 0, 0, INLINE_TRAILER_TAG]);
+pub const EMPTY: InlineArray = InlineArray(Inner {
+    inline: [0, 0, 0, 0, 0, 0, 0, INLINE_TRAILER_TAG],
+});
 
 #[repr(u8)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -105,7 +107,17 @@ const fn _static_tests() {
 /// by an Arc. The inner buffer is guaranteed to be aligned to
 /// 8 byte boundaries.
 #[repr(align(8))]
-pub struct InlineArray([u8; SZ]);
+pub struct InlineArray(Inner);
+
+#[derive(Clone, Copy)]
+#[repr(align(8))]
+union Inner {
+    inline: [u8; SZ],
+    remote: *const u8,
+}
+
+unsafe impl Send for InlineArray {}
+unsafe impl Sync for InlineArray {}
 
 impl Clone for InlineArray {
     fn clone(&self) -> InlineArray {
@@ -181,10 +193,9 @@ impl Drop for InlineArray {
                 .unwrap();
 
                 unsafe {
-                    let ptr = self.remote_ptr().map_addr(|a| a - small_trailer.len());
-                    let ptr_addr = ptr.expose_provenance();
+                    let ptr = self.remote_ptr().sub(small_trailer.len());
 
-                    dealloc(with_exposed_provenance_mut(ptr_addr), layout);
+                    dealloc(ptr.cast_mut(), layout);
                 }
             }
         } else if kind == Kind::BigRemote {
@@ -198,11 +209,9 @@ impl Drop for InlineArray {
                     Layout::from_size_align(big_header.len() + size_of::<BigRemoteHeader>(), SZ)
                         .unwrap();
                 let remote = self.remote_ptr();
-                let remote_addr = remote.expose_provenance();
-                let ptr = with_exposed_provenance_mut::<u8>(remote_addr);
 
                 unsafe {
-                    dealloc(ptr, layout);
+                    dealloc(remote.cast_mut(), layout);
                 }
             }
         }
@@ -259,21 +268,19 @@ impl Deref for InlineArray {
     #[inline]
     fn deref(&self) -> &[u8] {
         match self.kind() {
-            Kind::Inline => &self.0[..self.inline_len()],
+            Kind::Inline => unsafe { &self.0.inline[..self.inline_len()] },
             Kind::SmallRemote => unsafe {
                 let len = self.deref_small_trailer().len();
-                let data_ptr = self.remote_ptr().map_addr(|a| a - len);
-                let data_addr = data_ptr.expose_provenance();
+                let data_ptr = self.remote_ptr().sub(len);
 
-                std::slice::from_raw_parts(with_exposed_provenance(data_addr), len)
+                std::slice::from_raw_parts(data_ptr, len)
             },
             Kind::BigRemote => unsafe {
                 let len = self.deref_big_header().len();
                 let remote_ptr = self.remote_ptr();
-                let data_ptr = remote_ptr.map_addr(|a| a + size_of::<BigRemoteHeader>());
-                let data_addr = data_ptr.expose_provenance();
+                let data_ptr = remote_ptr.add(size_of::<BigRemoteHeader>());
 
-                std::slice::from_raw_parts(with_exposed_provenance(data_addr), len)
+                std::slice::from_raw_parts(data_ptr, len)
             },
         }
     }
@@ -300,11 +307,14 @@ impl Hash for InlineArray {
 
 impl InlineArray {
     fn new(slice: &[u8]) -> Self {
-        let mut data = [0_u8; SZ];
         if slice.len() <= INLINE_CUTOFF {
-            data[SZ - 1] = u8::try_from(slice.len()).unwrap() << 2;
-            data[..slice.len()].copy_from_slice(slice);
-            data[SZ - 1] |= INLINE_TRAILER_TAG;
+            let mut inline = [0_u8; SZ];
+
+            inline[SZ - 1] = u8::try_from(slice.len()).unwrap() << 2;
+            inline[..slice.len()].copy_from_slice(slice);
+            inline[SZ - 1] |= INLINE_TRAILER_TAG;
+
+            Self(Inner { inline })
         } else if slice.len() <= SMALL_REMOTE_CUTOFF {
             let layout =
                 Layout::from_size_align(slice.len() + size_of::<SmallRemoteTrailer>(), SZ).unwrap();
@@ -317,22 +327,21 @@ impl InlineArray {
             unsafe {
                 let data_ptr = alloc(layout);
                 assert!(!data_ptr.is_null());
-                let trailer_ptr = data_ptr.map_addr(|o| o + slice.len());
+                let trailer_ptr = data_ptr.add(slice.len());
 
                 std::ptr::write(trailer_ptr as *mut SmallRemoteTrailer, trailer);
                 std::ptr::copy_nonoverlapping(slice.as_ptr(), data_ptr, slice.len());
-                std::ptr::write_unaligned(
-                    data.as_mut_ptr() as _,
-                    trailer_ptr.expose_provenance().to_le_bytes(),
-                );
+
+                // assert that the bottom 3 bits are empty, as we expect
+                // the buffer to always have an alignment of 8 (2 ^ 3).
+                #[cfg(not(miri))]
+                assert_eq!(trailer_ptr.addr().to_le_bytes()[SZ - 1] & 0b111, 0);
+
+                let remote = trailer_ptr.map_addr(|addr| {
+                    addr | (SMALL_REMOTE_TRAILER_TAG as usize) << REMOTE_TAG_SHIFT
+                });
+                Self(Inner { remote })
             }
-
-            // assert that the bottom 3 bits are empty, as we expect
-            // the buffer to always have an alignment of 8 (2 ^ 3).
-            #[cfg(not(miri))]
-            assert_eq!(data[SZ - 1] & 0b111, 0);
-
-            data[SZ - 1] |= SMALL_REMOTE_TRAILER_TAG;
         } else {
             let layout =
                 Layout::from_size_align(slice.len() + size_of::<BigRemoteHeader>(), SZ).unwrap();
@@ -356,49 +365,39 @@ impl InlineArray {
                 let header_ptr = alloc(layout);
                 assert!(!header_ptr.is_null());
 
-                let data_ptr = header_ptr.map_addr(|o| o + size_of::<BigRemoteHeader>());
+                let data_ptr = header_ptr.add(size_of::<BigRemoteHeader>());
 
                 std::ptr::write(header_ptr as *mut BigRemoteHeader, header);
                 std::ptr::copy_nonoverlapping(slice.as_ptr(), data_ptr, slice.len());
-                std::ptr::write_unaligned(
-                    data.as_mut_ptr() as _,
-                    header_ptr.expose_provenance().to_le_bytes(),
-                );
+
+                // assert that the bottom 3 bits are empty, as we expect
+                // the buffer to always have an alignment of 8 (2 ^ 3).
+                #[cfg(not(miri))]
+                assert_eq!(header_ptr.addr().to_le_bytes()[SZ - 1] & 0b111, 0);
+
+                let remote = header_ptr
+                    .map_addr(|addr| addr | (BIG_REMOTE_TRAILER_TAG as usize) << REMOTE_TAG_SHIFT);
+                Self(Inner { remote })
             }
-
-            // assert that the bottom 3 bits are empty, as we expect
-            // the buffer to always have an alignment of 8 (2 ^ 3).
-            #[cfg(not(miri))]
-            assert_eq!(data[SZ - 1] & 0b111, 0);
-
-            data[SZ - 1] |= BIG_REMOTE_TRAILER_TAG;
         }
-        Self(data)
     }
 
     fn remote_ptr(&self) -> *const u8 {
         assert_ne!(self.kind(), Kind::Inline);
 
-        let mut copied = self.0;
-        copied[SZ - 1] &= TRAILER_PTR_MASK;
+        let remote_ptr = unsafe { self.0.remote };
 
-        unsafe { std::ptr::read_unaligned(copied.as_ptr() as *const *const u8) }
+        remote_ptr.map_addr(|addr| addr & !REMOTE_TAG_MASK)
     }
 
     fn deref_small_trailer(&self) -> &SmallRemoteTrailer {
         assert_eq!(self.kind(), Kind::SmallRemote);
-        let remote = self.remote_ptr();
-        let ptr = with_exposed_provenance_mut(remote.expose_provenance());
-
-        unsafe { &*(ptr) }
+        unsafe { &*self.remote_ptr().cast::<SmallRemoteTrailer>() }
     }
 
     fn deref_big_header(&self) -> &BigRemoteHeader {
         assert_eq!(self.kind(), Kind::BigRemote);
-        let remote = self.remote_ptr();
-        let ptr = with_exposed_provenance_mut(remote.expose_provenance());
-
-        unsafe { &*(ptr) }
+        unsafe { &*self.remote_ptr().cast::<BigRemoteHeader>() }
     }
 
     #[cfg(miri)]
@@ -418,7 +417,7 @@ impl InlineArray {
 
     #[cfg(miri)]
     fn inline_trailer(&self) -> u8 {
-        self.0[SZ - 1]
+        unsafe { self.0.inline[SZ - 1] }
     }
 
     #[cfg(not(miri))]
@@ -438,7 +437,7 @@ impl InlineArray {
 
     #[cfg(not(miri))]
     const fn inline_trailer(&self) -> u8 {
-        self.0[SZ - 1]
+        unsafe { self.0.inline[SZ - 1] }
     }
 
     /// This function returns a mutable reference to the inner
@@ -450,7 +449,7 @@ impl InlineArray {
         match self.kind() {
             Kind::Inline => {
                 let inline_len = self.inline_len();
-                &mut self.0[..inline_len]
+                unsafe { &mut self.0.inline[..inline_len] }
             }
             Kind::SmallRemote => {
                 if self.deref_small_trailer().rc.load(Ordering::Acquire) != 1 {
@@ -458,9 +457,9 @@ impl InlineArray {
                 }
                 unsafe {
                     let len = self.deref_small_trailer().len();
-                    let data_ptr = self.remote_ptr().map_addr(|a| a - len);
-                    let data_addr = data_ptr.expose_provenance();
-                    std::slice::from_raw_parts_mut(with_exposed_provenance_mut(data_addr), len)
+                    let data_ptr = self.remote_ptr().sub(len);
+
+                    std::slice::from_raw_parts_mut(data_ptr.cast_mut(), len)
                 }
             }
             Kind::BigRemote => {
@@ -468,14 +467,9 @@ impl InlineArray {
                     *self = InlineArray::from(self.deref())
                 }
                 unsafe {
-                    let data_ptr = self
-                        .remote_ptr()
-                        .map_addr(|a| a + size_of::<BigRemoteHeader>());
+                    let data_ptr = self.remote_ptr().add(size_of::<BigRemoteHeader>());
                     let len = self.deref_big_header().len();
-                    std::slice::from_raw_parts_mut(
-                        with_exposed_provenance_mut(data_ptr.expose_provenance()),
-                        len,
-                    )
+                    std::slice::from_raw_parts_mut(data_ptr.cast_mut(), len)
                 }
             }
         }
@@ -504,7 +498,7 @@ impl InlineArray {
     /// assert_eq!(&ia_2, bytes);
     /// ```
     pub fn into_raw(self) -> NonZeroU64 {
-        let ret = NonZeroU64::new(u64::from_le_bytes(self.0)).unwrap();
+        let ret = NonZeroU64::new(u64::from_le_bytes(unsafe { self.0.inline })).unwrap();
 
         std::mem::forget(self);
 
@@ -551,7 +545,9 @@ impl InlineArray {
     /// assert_eq!(&ia_2, bytes);
     /// ```
     pub unsafe fn from_raw(raw: NonZeroU64) -> InlineArray {
-        InlineArray(raw.get().to_le_bytes())
+        InlineArray(Inner {
+            inline: raw.get().to_le_bytes(),
+        })
     }
 }
 
