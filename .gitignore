@@ -6,3 +6,5 @@ cachegrind*
 callgrind*
 dhat*
 massif*
+
+fuzz/coverage/
