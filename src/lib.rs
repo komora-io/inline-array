@@ -138,7 +138,8 @@ impl Clone for InlineArray {
             loop {
                 let current = rc.load(Ordering::Relaxed);
                 if current == u8::MAX {
-                    return InlineArray::from(self.deref());
+                    let body: &[u8] = self.as_ref();
+                    return InlineArray::from(body);
                 }
 
                 let cas_res = rc.compare_exchange_weak(
@@ -157,7 +158,8 @@ impl Clone for InlineArray {
             loop {
                 let current = rc.load(Ordering::Relaxed);
                 if current == u16::MAX {
-                    return InlineArray::from(self.deref());
+                    let body: &[u8] = self.as_ref();
+                    return InlineArray::from(body);
                 }
 
                 let cas_res = rc.compare_exchange_weak(
@@ -301,7 +303,7 @@ impl Default for InlineArray {
 
 impl Hash for InlineArray {
     fn hash<H: Hasher>(&self, state: &mut H) {
-        self.deref().hash(state);
+        self.as_ref().hash(state)
     }
 }
 
@@ -443,7 +445,7 @@ impl InlineArray {
     /// This function returns a mutable reference to the inner
     /// byte array. If there are more than 1 atomic references
     /// to the inner array, the array is copied into a new
-    /// `InlineVec` and a reference to that is returned. This
+    /// `InlineArray` and a reference to that is returned. This
     /// functions similarly in spirit to [`std::sync::Arc::make_mut`].
     pub fn make_mut(&mut self) -> &mut [u8] {
         match self.kind() {
@@ -453,7 +455,8 @@ impl InlineArray {
             }
             Kind::SmallRemote => {
                 if self.deref_small_trailer().rc.load(Ordering::Acquire) != 1 {
-                    *self = InlineArray::from(self.deref())
+                    let body: &[u8] = self.as_ref();
+                    *self = InlineArray::from(body)
                 }
                 unsafe {
                     let len = self.deref_small_trailer().len();
@@ -464,7 +467,8 @@ impl InlineArray {
             }
             Kind::BigRemote => {
                 if self.deref_big_header().rc.load(Ordering::Acquire) != 1 {
-                    *self = InlineArray::from(self.deref())
+                    let body: &[u8] = self.as_ref();
+                    *self = InlineArray::from(body)
                 }
                 unsafe {
                     let data_ptr = self.remote_ptr().add(size_of::<BigRemoteHeader>());
@@ -662,6 +666,8 @@ impl fmt::Debug for InlineArray {
 #[cfg(test)]
 mod tests {
 
+    use crate::{INLINE_CUTOFF, SMALL_REMOTE_CUTOFF};
+
     use super::InlineArray;
 
     #[test]
@@ -700,6 +706,20 @@ mod tests {
         assert_eq!(initial, iv.make_mut());
     }
 
+    #[test]
+    fn mutate_clone() {
+        for len in [
+            INLINE_CUTOFF - 1,
+            SMALL_REMOTE_CUTOFF - 1,
+            SMALL_REMOTE_CUTOFF + 1,
+        ] {
+            let origin = InlineArray::from(vec![0_u8; len]);
+            let mut target = origin.clone();
+            target.make_mut()[0] = 1;
+            assert_ne!(origin, target);
+        }
+    }
+
     fn prop_identity(inline_array: &InlineArray) -> bool {
         let mut iv2 = inline_array.clone();
 
@@ -720,6 +740,14 @@ mod tests {
 
         let buf: &[u8] = inline_array.as_ref();
         assert_eq!(buf.as_ptr() as usize % 8, 0);
+
+        if !inline_array.is_empty() {
+            iv2.make_mut()[0] = iv2[0].wrapping_add(1);
+            if iv2 == inline_array {
+                println!("Mutating clone shouldn't mutate origin");
+                return false;
+            }
+        }
 
         true
     }

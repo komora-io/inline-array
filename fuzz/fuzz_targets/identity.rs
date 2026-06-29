@@ -24,12 +24,18 @@ fn prop_identity(inline_array: &InlineArray) -> bool {
     let buf: &[u8] = inline_array.as_ref();
     assert_eq!(buf.as_ptr() as usize % 8, 0);
 
-    let ptr = iv2.into_raw();
+    let ptr = iv2.clone().into_raw();
     let rt = unsafe { InlineArray::from_raw(ptr) };
     assert_eq!(&rt, inline_array);
 
     if inline_array.is_empty() {
         assert_eq!(inline_array, &inline_array::EMPTY);
+    } else {
+        iv2.make_mut()[0] = iv2[0].wrapping_add(1);
+        if iv2 == inline_array {
+            println!("Mutating clone shouldn't mutate origin");
+            return false;
+        }
     }
 
     true
