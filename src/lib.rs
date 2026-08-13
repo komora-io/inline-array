@@ -453,7 +453,7 @@ impl InlineArray {
             }
             Kind::SmallRemote => {
                 if self.deref_small_trailer().rc.load(Ordering::Acquire) != 1 {
-                    *self = InlineArray::from(self.deref())
+                    *self = InlineArray::from(&**self)
                 }
                 unsafe {
                     let len = self.deref_small_trailer().len();
@@ -464,7 +464,7 @@ impl InlineArray {
             }
             Kind::BigRemote => {
                 if self.deref_big_header().rc.load(Ordering::Acquire) != 1 {
-                    *self = InlineArray::from(self.deref())
+                    *self = InlineArray::from(&**self)
                 }
                 unsafe {
                     let data_ptr = self.remote_ptr().add(size_of::<BigRemoteHeader>());
